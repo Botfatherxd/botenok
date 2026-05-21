@@ -1,0 +1,700 @@
+import telebot
+from telebot import types
+import requests
+import random
+import string
+import time
+import json
+import os
+
+# --- КОНФИГУРАЦИЯ ---
+BOT_TOKEN = "8730600142:AAHsVpeL07RpT6MB5SBlSEeqz9MEm_5YKAE"
+ADMIN_USERNAME = kebabich  # Твой Telegram ID (kebabich)
+CHANNEL_USERNAME = "@rozasearch"
+PREMIUM_PRICE = 50
+DATA_FILE = "users_data.json"
+
+# --- ЗАГРУЗКА/СОХРАНЕНИЕ ДАННЫХ ---
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+users = load_data()
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# --- ФУНКЦИИ ПРОВЕРКИ ЮЗЕРНЕЙМОВ ---
+def check_username_tg(username: str) -> bool:
+    """
+    Проверка через Telegram API (аккаунты).
+    True = СВОБОДЕН, False = ЗАНЯТ
+    """
+    try:
+        # Метод через проверку существования чата
+        url = f"https://t.me/{username}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        
+        # Если редиректит на страницу "не найден" или нет meta-тегов профиля
+        if "tgme_page_title" not in response.text:
+            return True
+        # Дополнительная проверка по фразе "If you have Telegram"
+        if "If you have Telegram, you can contact" in response.text:
+            return True
+        return False
+    except:
+        return None
+
+def check_username_fragment(username: str) -> bool:
+    """
+    Проверка через Fragment API (аукционы/номера).
+    True = СВОБОДЕН (нет на аукционе), False = ЗАНЯТ
+    """
+    try:
+        url = f"https://fragment.com/username/{username}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        # Проверяем наличие таблицы с лотами (если есть таблица - юз в аукционе/продан)
+        if "table" in response.text and ("auction" in response.text.lower() or "sold" in response.text.lower()):
+            # Дополнительно проверяем статус "Available" 
+            if "Available" in response.text and "Not available" not in response.text:
+                return True
+            return False
+        # Если нет таблицы и нет информации о продаже - свободен
+        if "No results" in response.text or "not found" in response.text.lower():
+            return True
+        return True  # Считаем свободным если не нашли информацию о занятости
+    except:
+        return None
+
+def generate_random_username(length: int, with_digits: bool) -> str:
+    """Генерация случайного юзернейма заданной длины"""
+    chars = string.ascii_lowercase
+    if with_digits:
+        chars += string.digits
+    
+    # Гарантируем что начинается с буквы (правила Telegram)
+    first_char = random.choice(string.ascii_lowercase)
+    rest = ''.join(random.choices(chars, k=length-1))
+    return first_char + rest
+
+# --- КЛАВИАТУРЫ ---
+def main_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("🔎 ПОИСК", callback_data="menu_search")
+    btn2 = types.InlineKeyboardButton("👤 ПРОФИЛЬ", callback_data="menu_profile")
+    btn3 = types.InlineKeyboardButton("🌹 ПРЕМИУМ", callback_data="menu_premium")
+    markup.add(btn1, btn2, btn3)
+    return markup
+
+def search_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("5 букв", callback_data="search_5")
+    btn2 = types.InlineKeyboardButton("6 букв", callback_data="search_6")
+    btn_back = types.InlineKeyboardButton("⬅️ Назад", callback_data="back_main")
+    markup.add(btn1, btn2, btn_back)
+    return markup
+
+def subcategory_menu(length):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    btn1 = types.InlineKeyboardButton("🔢 С цифрами", callback_data=f"sub_{length}_digits")
+    btn2 = types.InlineKeyboardButton("🔤 Без цифр", callback_data=f"sub_{length}_letters")
+    btn_back = types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_search")
+    markup.add(btn1, btn2, btn_back)
+    return markup
+
+def admin_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast"),
+        types.InlineKeyboardButton("👤 Выдать юзеру", callback_data="admin_give_user")
+    )
+    markup.add(
+        types.InlineKeyboardButton("👥 Выдать всем", callback_data="admin_give_all"),
+        types.InlineKeyboardButton("🎁 Премиум юзеру", callback_data="admin_premium_user")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🎲 Премиум рандомам", callback_data="admin_premium_random"),
+        types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")
+    )
+    markup.add(types.InlineKeyboardButton("⬅️ Выход", callback_data="back_main"))
+    return markup
+
+# --- ФУНКЦИИ АДМИНКИ ---
+def is_admin(user_id):
+    return user_id == ADMIN_USERNAME
+
+# --- КОМАНДЫ ---
+@bot.message_handler(commands=['start'])
+def cmd_start(message):
+    user_id = str(message.from_user.id)
+    
+    # Инициализация пользователя
+    if user_id not in users:
+        users[user_id] = {
+            "username": message.from_user.username or "нет",
+            "first_name": message.from_user.first_name,
+            "attempts": 5,
+            "premium_attempts": 0,
+            "is_premium": False,
+            "referral_count": 0,
+            "referred_by": None,
+            "cooldown": 10,
+            "join_date": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_data(users)
+    
+    # Обработка реферальной ссылки
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith('ref_'):
+        ref_id = args[1].replace('ref_', '')
+        if ref_id != user_id and ref_id in users:
+            if not users[user_id].get("referred_by"):
+                users[user_id]["referred_by"] = ref_id
+                users[ref_id]["referral_count"] = users[ref_id].get("referral_count", 0) + 1
+                save_data(users)
+                bot.send_message(int(ref_id), f"🎉 По твоей ссылке зарегистрировался новый пользователь!")
+    
+    welcome = (
+        f"👋 Привет, {message.from_user.first_name}!\n\n"
+        f"📰 Добро пожаловать в RozaSearch — официального бота канала {CHANNEL_USERNAME}\n\n"
+        f"🎯 Я помогаю находить 100% свободные Telegram-юзернеймы!\n"
+        f"🔍 У тебя есть {users[user_id]['attempts']} бесплатных попыток\n\n"
+        f"Выбирай действие:"
+    )
+    bot.send_message(message.chat.id, welcome, reply_markup=main_menu())
+
+@bot.message_handler(commands=['admin'])
+def cmd_admin(message):
+    if not is_admin(message.from_user.id):
+        bot.reply_to(message, "❌ Нет доступа")
+        return
+    
+    bot.send_message(
+        message.chat.id,
+        "🔐 <b>Админ-панель RozaSearch</b>\n\n"
+        f"👑 Админ: @{message.from_user.username}\n"
+        f"👥 Всего пользователей: {len(users)}\n\n"
+        "Выбери действие:",
+        parse_mode="HTML",
+        reply_markup=admin_menu()
+    )
+
+# --- ОБРАБОТКА CALLBACK ---
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    user_id = str(call.from_user.id)
+    data = call.data
+    
+    try:
+        # Навигация
+        if data == "back_main":
+            bot.edit_message_text("🔍 Главное меню:", call.message.chat.id, call.message.message_id, reply_markup=main_menu())
+        
+        elif data == "menu_search":
+            bot.edit_message_text("Выбери длину юзернейма:", call.message.chat.id, call.message.message_id, reply_markup=search_menu())
+        
+        elif data.startswith("search_"):
+            length = data.split("_")[1]
+            bot.edit_message_text(f"Длина: {length} символов\nВыбери тип:", call.message.chat.id, call.message.message_id, reply_markup=subcategory_menu(length))
+        
+        elif data.startswith("sub_"):
+            _, length, mode = data.split("_")
+            perform_search(call, int(length), mode == "digits")
+        
+        # Профиль
+        elif data == "menu_profile":
+            show_profile(call)
+        
+        # Премиум
+        elif data == "menu_premium":
+            show_premium(call)
+        
+        elif data == "buy_premium":
+            create_invoice(call)
+        
+        # Админка
+        elif data == "admin_back":
+            if is_admin(call.from_user.id):
+                bot.edit_message_text("🔐 Админ-панель:", call.message.chat.id, call.message.message_id, reply_markup=admin_menu())
+        
+        elif data == "admin_broadcast":
+            if is_admin(call.from_user.id):
+                msg = bot.edit_message_text(
+                    "📢 Отправь сообщение для рассылки (текст, фото, видео):\n"
+                    "Для отмены — /admin",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+                bot.register_next_step_handler(msg, process_broadcast)
+        
+        elif data == "admin_give_user":
+            if is_admin(call.from_user.id):
+                msg = bot.edit_message_text(
+                    "Введи ID пользователя и количество попыток через пробел:\n"
+                    "Пример: 123456789 10",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+                bot.register_next_step_handler(msg, process_give_user)
+        
+        elif data == "admin_give_all":
+            if is_admin(call.from_user.id):
+                msg = bot.edit_message_text(
+                    "Введи количество попыток для ВСЕХ пользователей:\n"
+                    "Пример: 5",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+                bot.register_next_step_handler(msg, process_give_all)
+        
+        elif data == "admin_premium_user":
+            if is_admin(call.from_user.id):
+                msg = bot.edit_message_text(
+                    "Введи ID пользователя для выдачи Премиум:\n"
+                    "Пример: 123456789",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+                bot.register_next_step_handler(msg, process_premium_user)
+        
+        elif data == "admin_premium_random":
+            if is_admin(call.from_user.id):
+                msg = bot.edit_message_text(
+                    "Введи количество рандомных пользователей для выдачи Премиум:\n"
+                    "Пример: 3",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+                bot.register_next_step_handler(msg, process_premium_random)
+        
+        elif data == "admin_stats":
+            if is_admin(call.from_user.id):
+                show_stats(call)
+    
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Ошибка: {e}", show_alert=True)
+
+# --- ФУНКЦИИ ПОИСКА ---
+def perform_search(call, length, with_digits):
+    user_id = str(call.from_user.id)
+    
+    # Проверка попыток
+    if user_id not in users:
+        bot.answer_callback_query(call.id, "Нажми /start", show_alert=True)
+        return
+    
+    total_attempts = users[user_id]["attempts"] + users[user_id]["premium_attempts"]
+    if total_attempts <= 0:
+        bot.answer_callback_query(call.id, "❌ Нет попыток! Получи Премиум.", show_alert=True)
+        return
+    
+    # Статус поиска
+    bot.edit_message_text(
+        f"🔍 <b>Ищем свободный юзернейм...</b>\n\n"
+        f"📏 Длина: {length} символов\n"
+        f"{'🔢' if with_digits else '🔤'} Тип: {'с цифрами' if with_digits else 'только буквы'}\n\n"
+        f"⏳ Проверяю базы Telegram и Fragment...",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="HTML"
+    )
+    
+    # Списываем попытку
+    if users[user_id]["premium_attempts"] > 0:
+        users[user_id]["premium_attempts"] -= 1
+    else:
+        users[user_id]["attempts"] -= 1
+    save_data(users)
+    
+    # Поиск (до 100 попыток найти свободный)
+    found = False
+    searched_usernames = []
+    
+    for _ in range(100):
+        username = generate_random_username(length, with_digits)
+        searched_usernames.append(username)
+        
+        # Проверяем
+        tg_free = check_username_tg(username)
+        frag_free = check_username_fragment(username)
+        
+        if tg_free and frag_free:
+            found = True
+            
+            # Формируем результат
+            result = (
+                f"🎉 <b>Найден свободный юзернейм!</b>\n\n"
+                f"✅ <code>@{username}</code>\n\n"
+                f"📊 Результаты проверки:\n"
+                f"▫️ Telegram: ✅ Свободен\n"
+                f"▫️ Fragment: ✅ Нет в аукционах\n\n"
+                f"⚡️ <b>100% свободен!</b> Забирай скорее!\n\n"
+                f"🔗 <a href='https://t.me/{username}'>Открыть в Telegram</a>\n\n"
+                f"📈 Осталось попыток:\n"
+                f"▫️ Базовые: {users[user_id]['attempts']}\n"
+                f"▫️ Премиум: {users[user_id]['premium_attempts']}"
+            )
+            
+            # Клавиатура
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("🔄 Искать ещё", callback_data=f"search_{length}"))
+            markup.add(types.InlineKeyboardButton("📋 Главное меню", callback_data="back_main"))
+            
+            bot.edit_message_text(
+                result,
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="HTML",
+                reply_markup=markup,
+                disable_web_page_preview=False
+            )
+            
+            # Лог админу
+            if found:
+                bot.send_message(
+                    ADMIN_USERNAME,
+                    f"🔍 @{call.from_user.username or call.from_user.id} нашёл @{username}\n"
+                    f"Длина: {length}, Цифры: {with_digits}",
+                    disable_web_page_preview=True
+                )
+            
+            save_data(users)
+            return
+    
+    # Если не нашли (очень редко)
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"search_{length}"))
+    markup.add(types.InlineKeyboardButton("📋 Меню", callback_data="back_main"))
+    
+    bot.edit_message_text(
+        "😔 Не удалось найти свободный юзернейм за 100 попыток.\n"
+        "Попробуй другую длину или тип.",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
+
+# --- ПРОФИЛЬ ---
+def show_profile(call):
+    user_id = str(call.from_user.id)
+    user = users.get(user_id, {})
+    
+    ref_link = f"https://t.me/{bot.get_me().username}?start=ref_{user_id}"
+    
+    profile_text = (
+        f"👤 <b>Твой профиль</b>\n\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"👋 Имя: {user.get('first_name', 'Нет')}\n"
+        f"📅 С нами с: {user.get('join_date', 'Неизвестно')}\n\n"
+        f"🔍 <b>Попытки поиска:</b>\n"
+        f"▫️ Базовые: {user.get('attempts', 0)}\n"
+        f"▫️ Премиум: {user.get('premium_attempts', 0)}\n"
+        f"⭐️ Статус: {'🌹 Премиум' if user.get('is_premium') else '👤 Обычный'}\n"
+        f"⏱ КД поиска: {3 if user.get('is_premium') else user.get('cooldown', 10)} сек\n\n"
+        f"👥 <b>Реферальная система:</b>\n"
+        f"▫️ Приглашено: {user.get('referral_count', 0)} чел.\n"
+        f"▫️ Твоя ссылка:\n<code>{ref_link}</code>\n\n"
+        f"💰 За каждого реферала: +1 попытка!"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📋 Главное меню", callback_data="back_main"))
+    
+    bot.edit_message_text(
+        profile_text,
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="HTML",
+        reply_markup=markup
+    )
+
+# --- ПРЕМИУМ ---
+def show_premium(call):
+    premium_text = (
+        "🌹 <b>Премиум RozaSearch</b>\n\n"
+        "✨ <b>Преимущества:</b>\n"
+        "▫️ +20 попыток поиска\n"
+        "▫️ КД поиска: 3 сек (вместо 10)\n"
+        "▫️ Доступ к Бета-тестам\n"
+        "▫️ Приоритетная поддержка\n\n"
+        f"💎 <b>Стоимость: {PREMIUM_PRICE} ⭐️</b>\n\n"
+        "🎁 После покупки ты получишь:\n"
+        "▫️ 20 премиум-попыток\n"
+        "▫️ Значок 🌹 в профиле\n"
+        "▫️ Быстрый поиск без ожидания"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(f"💎 Купить за {PREMIUM_PRICE} ⭐️", callback_data="buy_premium"))
+    markup.add(types.InlineKeyboardButton("📋 Меню", callback_data="back_main"))
+    
+    bot.edit_message_text(
+        premium_text,
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="HTML",
+        reply_markup=markup
+    )
+
+def create_invoice(call):
+    """Создание счета на оплату Звёздами"""
+    try:
+        invoice = bot.send_invoice(
+            call.message.chat.id,
+            title="🌹 Премиум RozaSearch",
+            description="Доступ к расширенным функциям поиска юзернеймов",
+            invoice_payload=f"premium_{call.from_user.id}",
+            provider_token="",  # Для звёзд оставляем пустым
+            currency="XTR",
+            prices=[types.LabeledPrice("Премиум доступ", PREMIUM_PRICE)],
+            start_parameter="premium"
+        )
+        
+        bot.answer_callback_query(call.id, "Счёт создан! Оплати его ниже 👇")
+    
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Ошибка создания счёта: {e}", show_alert=True)
+
+# --- ОБРАБОТКА ОПЛАТЫ ---
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def process_pre_checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@bot.message_handler(content_types=['successful_payment'])
+def handle_successful_payment(message):
+    user_id = str(message.from_user.id)
+    
+    if user_id not in users:
+        users[user_id] = {"attempts": 5, "premium_attempts": 0, "is_premium": False}
+    
+    users[user_id]["is_premium"] = True
+    users[user_id]["premium_attempts"] += 20
+    users[user_id]["cooldown"] = 3
+    
+    save_data(users)
+    
+    bot.send_message(
+        message.chat.id,
+        "🎉 <b>Оплата прошла успешно!</b>\n\n"
+        "🌹 Ты получил Премиум статус!\n"
+        "▫️ +20 премиум-попыток\n"
+        "▫️ КД поиска: 3 сек\n"
+        "▫️ Доступ к Бета-тестам\n\n"
+        "Спасибо за поддержку! ❤️",
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+    
+    # Уведомление админу
+    bot.send_message(
+        ADMIN_USERNAME,
+        f"💰 Пользователь @{message.from_user.username or user_id} оплатил Премиум!"
+    )
+
+# --- АДМИН-ФУНКЦИИ ---
+def process_broadcast(message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    # Рассылка сообщения всем пользователям
+    sent = 0
+    failed = 0
+    
+    bot.send_message(ADMIN_USERNAME, "📢 Начинаю рассылку...")
+    
+    for uid in users:
+        try:
+            # Копируем сообщение (текст, фото, видео и т.д.)
+            bot.copy_message(
+                chat_id=int(uid),
+                from_chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("📢 " + CHANNEL_USERNAME, url=f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}")
+                )
+            )
+            sent += 1
+            time.sleep(0.05)  # Защита от флуда
+        except:
+            failed += 1
+    
+    bot.send_message(
+        ADMIN_USERNAME,
+        f"✅ Рассылка завершена:\n"
+        f"▫️ Отправлено: {sent}\n"
+        f"▫️ Ошибок: {failed}",
+        reply_markup=admin_menu()
+    )
+
+def process_give_user(message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        target_id, amount = message.text.split()
+        target_id = str(target_id)
+        amount = int(amount)
+        
+        if target_id not in users:
+            users[target_id] = {"attempts": 5, "premium_attempts": 0, "is_premium": False}
+        
+        users[target_id]["attempts"] += amount
+        save_data(users)
+        
+        bot.send_message(ADMIN_USERNAME, f"✅ Выдано {amount} попыток пользователю {target_id}", reply_markup=admin_menu())
+        
+        # Уведомление пользователю (с подписью админа)
+        try:
+            bot.send_message(
+                int(target_id),
+                f"🎁 <b>Администратор @{message.from_user.username} выдал тебе {amount} попыток!</b>\n"
+                f"Всего попыток: {users[target_id]['attempts'] + users[target_id]['premium_attempts']}",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+    except:
+        bot.send_message(ADMIN_USERNAME, "❌ Неверный формат. Пример: 123456789 10", reply_markup=admin_menu())
+
+def process_give_all(message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        amount = int(message.text)
+        
+        for uid in users:
+            if uid not in users:
+                continue
+            users[uid]["attempts"] += amount
+        
+        save_data(users)
+        
+        bot.send_message(
+            ADMIN_USERNAME,
+            f"✅ Выдано {amount} попыток ВСЕМ пользователям ({len(users)} чел.)",
+            reply_markup=admin_menu()
+        )
+    except:
+        bot.send_message(ADMIN_USERNAME, "❌ Введи число", reply_markup=admin_menu())
+
+def process_premium_user(message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        target_id = str(message.text.strip())
+        
+        if target_id not in users:
+            users[target_id] = {"attempts": 5, "premium_attempts": 0, "is_premium": False}
+        
+        users[target_id]["is_premium"] = True
+        users[target_id]["premium_attempts"] += 20
+        users[target_id]["cooldown"] = 3
+        save_data(users)
+        
+        bot.send_message(ADMIN_USERNAME, f"✅ Премиум выдан пользователю {target_id}", reply_markup=admin_menu())
+        
+        # Уведомление
+        try:
+            bot.send_message(
+                int(target_id),
+                f"🌹 <b>Администратор @{message.from_user.username} выдал тебе Премиум!</b>\n"
+                "+20 премиум-попыток, КД 3 сек, доступ к Бета-тестам",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+    except:
+        bot.send_message(ADMIN_USERNAME, "❌ Неверный ID", reply_markup=admin_menu())
+
+def process_premium_random(message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        count = int(message.text)
+        all_users = list(users.keys())
+        
+        if count > len(all_users):
+            count = len(all_users)
+        
+        winners = random.sample(all_users, count)
+        
+        for uid in winners:
+            users[uid]["is_premium"] = True
+            users[uid]["premium_attempts"] += 20
+            users[uid]["cooldown"] = 3
+            
+            # Уведомление победителям
+            try:
+                bot.send_message(
+                    int(uid),
+                    f"🎉 <b>Ты выиграл Премиум в случайном розыгрыше!</b>\n"
+                    f"🌹 +20 премиум-попыток, КД 3 сек!\n\n"
+                    f"Розыгрыш провёл: @{message.from_user.username}",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+        
+        save_data(users)
+        
+        bot.send_message(
+            ADMIN_USERNAME,
+            f"🎲 Премиум выдан {count} рандомным пользователям!\n"
+            f"Победители: {', '.join(winners)}",
+            reply_markup=admin_menu()
+        )
+    except:
+        bot.send_message(ADMIN_USERNAME, "❌ Введи число", reply_markup=admin_menu())
+
+def show_stats(call):
+    if not is_admin(call.from_user.id):
+        return
+    
+    total = len(users)
+    premium = sum(1 for u in users.values() if u.get("is_premium"))
+    
+    stats = (
+        f"📊 <b>Статистика RozaSearch</b>\n\n"
+        f"👥 Всего пользователей: {total}\n"
+        f"🌹 Премиум: {premium}\n"
+        f"👤 Обычных: {total - premium}\n\n"
+        f"💎 Куплено Премиумов: {premium}\n"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats"))
+    markup.add(types.InlineKeyboardButton("⬅️ Админ-панель", callback_data="admin_back"))
+    
+    bot.edit_message_text(stats, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
+
+# --- ЗАПУСК ---
+if __name__ == "__main__":
+    print("🌹 RozaSearch запущен!")
+    print(f"👑 Админ: {ADMIN_USERNAME}")
+    print(f"📢 Канал: {CHANNEL_USERNAME}")
+    
+    # Проверка токена
+    try:
+        bot_info = bot.get_me()
+        print(f"✅ Бот @{bot_info.username} готов к работе")
+    except:
+        print("❌ Неверный токен!")
+        exit(1)
+    
+    bot.polling(none_stop=True)
